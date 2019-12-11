@@ -19,6 +19,7 @@ created time: 2015-11-30
 
 #include "relocate.h"
 #include "include/inlineHook.h"
+#include <stdint.h>
 
 #ifndef PAGE_SIZE
 #define PAGE_SIZE 4096
@@ -31,7 +32,55 @@ created time: 2015-11-30
 
 #define ACTION_ENABLE	0
 #define ACTION_DISABLE	1
-	
+
+#define A32_MAX_INSTRUCTIONS 10
+#define A32_MAX_BACKUPS 256
+
+#define __attribute                __attribute__
+#define aligned(x)                 __aligned__(x)
+#define __intval(p)                (intptr_t)(p)
+#define __uintval(p)               (uintptr_t)(p)
+#define __ptr(p)                   (void *)(p)
+#define __page_size                4096
+#define __page_align(n)            __align_up((uintptr_t)(n), __page_size)
+#define __ptr_align(x)             __ptr(__align_down((uintptr_t)(x), __page_size))
+#define __align_up(x, n)           (((x) + ((n) - 1)) & ~((n) - 1))
+#define __align_down(x, n)         ((x) & -(n))
+#define __countof(x)               (uintptr_t)(sizeof(x) / sizeof((x)[0])) // must be signed
+#define __atomic_increase(p)       __sync_add_and_fetch(p, 1)
+#define __sync_cmpswap(p, v, n)    __sync_bool_compare_and_swap(p, v, n)
+#define __predict_true(exp)        __builtin_expect((exp) != 0, 1)
+#define __make_rwx(p, n)           mprotect(__ptr_align(p), \
+                                              __page_align(__uintval(p) + n) != __page_align(__uintval(p)) ? __page_align(n) + __page_size : __page_align(n), \
+                                              PROT_READ | PROT_WRITE | PROT_EXEC)
+
+//-------------------------------------------------------------------------
+
+static __attribute((aligned(__page_size))) uint32_t __insns_pool[A32_MAX_BACKUPS][A32_MAX_INSTRUCTIONS * 10];
+
+//-------------------------------------------------------------------------
+void __attribute__((constructor(101))) Ele7enHookInit(){
+    __make_rwx(__insns_pool, sizeof(__insns_pool));
+    // A64_LOGI("insns pool initialized.");
+}
+
+
+//-------------------------------------------------------------------------
+
+static uint32_t *FastAllocateTrampoline()
+{
+    // static_assert((A32_MAX_INSTRUCTIONS * 10 * sizeof(uint32_t)) % 8 == 0, "8-byte align");
+    static volatile int32_t __index = -1;
+
+    int32_t i = __atomic_increase(&__index);
+    if (__predict_true(i >= 0 && i < __countof(__insns_pool))) {
+        return __insns_pool[i];
+    } //if
+
+    // A64_LOGE("failed to allocate trampoline!");
+    return NULL;
+}
+    
 enum hook_status {
 	REGISTERED,
 	HOOKED,
@@ -277,10 +326,13 @@ enum ele7en_status registerInlineHook(uint32_t target_addr, uint32_t new_addr, u
 	item->proto_addr = proto_addr;
 
 	item->length = TEST_BIT0(item->target_addr) ? 12 : 8;
-	item->orig_instructions = malloc(item->length);
+	// item->orig_instructions = malloc(item->length);
+	item->orig_instructions = FastAllocateTrampoline();
+  
 	memcpy(item->orig_instructions, (void *) CLEAR_BIT0(item->target_addr), item->length);
 
-	item->trampoline_instructions = mmap(NULL, PAGE_SIZE, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_ANONYMOUS | MAP_PRIVATE, 0, 0);
+	// item->trampoline_instructions = mmap(NULL, PAGE_SIZE, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_ANONYMOUS | MAP_PRIVATE, 0, 0);
+  item->trampoline_instructions = FastAllocateTrampoline();
 	relocateInstruction(item->target_addr, item->orig_instructions, item->length, item->trampoline_instructions, item->orig_boundaries, item->trampoline_boundaries, &item->count);
 
 	item->status = REGISTERED;
@@ -290,11 +342,11 @@ enum ele7en_status registerInlineHook(uint32_t target_addr, uint32_t new_addr, u
 
 static void doInlineUnHook(struct inlineHookItem *item, int pos)
 {
-	mprotect((void *) PAGE_START(CLEAR_BIT0(item->target_addr)), PAGE_SIZE * 2, PROT_READ | PROT_WRITE | PROT_EXEC);
+	// mprotect((void *) PAGE_START(CLEAR_BIT0(item->target_addr)), PAGE_SIZE * 2, PROT_READ | PROT_WRITE | PROT_EXEC);
 	memcpy((void *) CLEAR_BIT0(item->target_addr), item->orig_instructions, item->length);
-	mprotect((void *) PAGE_START(CLEAR_BIT0(item->target_addr)), PAGE_SIZE * 2, PROT_READ | PROT_EXEC);
-	munmap(item->trampoline_instructions, PAGE_SIZE);
-	free(item->orig_instructions);
+	// mprotect((void *) PAGE_START(CLEAR_BIT0(item->target_addr)), PAGE_SIZE * 2, PROT_READ | PROT_EXEC);
+	// munmap(item->trampoline_instructions, PAGE_SIZE);
+	// free(item->orig_instructions);
 
 	deleteInlineHookItem(pos);
 
